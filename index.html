@@ -130,7 +130,7 @@
             padding: calc(var(--ui, 18px) * 0.5) calc(var(--ui, 18px) * 0.3);
             border-radius: calc(var(--ui, 18px) * 0.65);
         }
-        #settingsModal #btnShare {
+        #settingsModal #btnShare, #settingsModal #btnHist {
             font-size: calc(var(--ui, 18px) * 0.8);
             padding: calc(var(--ui, 18px) * 0.25) calc(var(--ui, 18px) * 0.6);
             border-radius: calc(var(--ui, 18px) * 0.5);
@@ -241,7 +241,7 @@
                     <button id="diff-4" onclick="setDifficulty(4)" class="tactile-btn py-2 sm:py-3 px-1 rounded-xl font-bold text-[clamp(0.95rem,2.4vw,1.45rem)] bg-[#4a2e19] text-amber-200 border border-[#784b2a]">Khó</button>
                     <button id="diff-5" onclick="setDifficulty(5)" class="tactile-btn py-2 sm:py-3 px-1 rounded-xl font-bold text-[clamp(0.95rem,2.4vw,1.45rem)] bg-[#4a2e19] text-amber-200 border border-[#784b2a]">Rất Khó</button>
                     <button id="diff-6" onclick="setDifficulty(6)" class="tactile-btn py-2 sm:py-3 px-1 rounded-xl font-bold text-[clamp(0.95rem,2.4vw,1.45rem)] bg-[#4a2e19] text-amber-200 border border-[#784b2a]">🏆 Cao Thủ</button>
-                    <button id="diff-7" onclick="setDifficulty(7)" class="tactile-btn col-span-2 py-2 sm:py-3 px-1 rounded-xl font-bold text-[clamp(0.95rem,2.4vw,1.45rem)] bg-[#4a2e19] text-amber-200 border border-[#784b2a]">🎯 Tự động theo trình độ</button>
+                    <button id="diff-7" onclick="setDifficulty(7)" class="tactile-btn py-2 sm:py-3 px-1 rounded-xl font-bold text-[clamp(0.95rem,2.4vw,1.45rem)] bg-[#4a2e19] text-amber-200 border border-[#784b2a]">🎯 Tự động</button>
                 </div>
             </div>
 
@@ -254,7 +254,10 @@
             </div>
 
             <div class="mb-3">
-                <div class="font-extrabold text-amber-200 mb-1.5 text-[clamp(1rem,2.3vw,1.3rem)]">Trò chơi</div>
+                <div class="flex items-center justify-between mb-1.5">
+                    <div class="font-extrabold text-amber-200 text-[clamp(1rem,2.3vw,1.3rem)]" style="margin-bottom:0">Trò chơi</div>
+                    <button id="btnHist" onclick="toggleHistory()" aria-label="Lịch sử" title="Lịch sử" class="tactile-btn bg-[#4a2e19] text-amber-100 border border-[#784b2a] font-bold rounded-lg">📜 Lịch sử</button>
+                </div>
                 <div class="grid grid-cols-2 gap-2">
                     <button id="variant-up" onclick="setVariant('up')" class="tactile-btn py-2 sm:py-3 px-1 rounded-xl font-black text-[clamp(0.9rem,2.2vw,1.3rem)] bg-amber-500 text-stone-950 ring-2 ring-amber-200">🎴 Cờ úp</button>
                     <button id="variant-tuong" onclick="setVariant('tuong')" class="tactile-btn py-2 sm:py-3 px-1 rounded-xl font-bold text-[clamp(0.9rem,2.2vw,1.3rem)] bg-[#4a2e19] text-amber-200 border border-[#784b2a]">♟️ Cờ tướng</button>
@@ -269,7 +272,7 @@
             </div>
 
             <div class="flex items-stretch">
-                <div id="histBox" class="mb-3" style="font-size:calc(var(--ui,18px)*0.75)"></div>
+                <div id="histBox" class="hidden mb-3" style="font-size:calc(var(--ui,18px)*0.75);max-height:calc(var(--ui,18px)*7);overflow-y:auto"></div>
                 <button id="btnDone" onclick="closeSettings()" class="tactile-btn w-full text-white font-black rounded-xl">XONG</button>
             </div>
         </div>
@@ -656,7 +659,6 @@
                 } else {
                     btn.className = 'tactile-btn py-2 sm:py-3 px-1 rounded-xl font-bold text-[clamp(0.95rem,2.4vw,1.45rem)] bg-[#4a2e19] text-amber-200 border border-[#784b2a]';
                 }
-                if (i === 7) btn.classList.add('col-span-2');
                 if (mode === 'pvp') btn.classList.add('opacity-40', 'pointer-events-none');
             }
         }
@@ -1682,6 +1684,15 @@
                 localStorage.setItem(HIST_KEY, JSON.stringify(h.slice(-40)));
             } catch (e) {}
         }
+        function toggleHistory() {
+            const el = document.getElementById('histBox');
+            let h = [];
+            try { h = JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); } catch (e) {}
+            if (!h.length) { showToast('Chưa có ván nào được lưu'); return; }
+            renderHistory();
+            el.classList.toggle('hidden');
+            playTone('select');
+        }
         function renderHistory() {
             const el = document.getElementById('histBox');
             if (!el) return;
@@ -2332,7 +2343,7 @@
         }
 
         function openSettings() {
-            renderHistory();
+            const hb = document.getElementById('histBox'); if (hb) hb.classList.add('hidden');
             document.getElementById('settingsModal').classList.remove('hidden');
         }
 
