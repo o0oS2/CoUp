@@ -1465,6 +1465,207 @@
             return (board[m.fromR][m.fromC].isHidden ? base * 0.85 : base) + pause;
         }
 
+/* =============================================================
+         * ENGINE NHANH (mảng số nguyên, đi/hoàn nước) + ISMCTS
+         * Mỗi lượt mô phỏng: chia ngẫu nhiên quân úp theo xác suất còn lại -> đi xuống cây (UCT) -> chấm lá bằng tìm kiếm yên tĩnh.
+         * Lật quân = nút may rủi: giá trị được lấy trung bình trên rất nhiều cách chia bài.
+         * ============================================================= */
+        const TY = { K: 1, R: 2, C: 3, H: 4, E: 5, A: 6, P: 7 }, TV = [0, 0, 950, 480, 420, 210, 210, 140];
+        const FC = new Int8Array(90), FT = new Int8Array(90), FH = new Uint8Array(90), FS = new Int8Array(90), KP = [0, 0, 0];
+        const SR = new Int8Array(90), SC = new Int8Array(90);
+        for (let i = 0; i < 90; i++) { SR[i] = (i / 9) | 0; SC[i] = i % 9; }
+        const MB = Array.from({ length: 64 }, () => new Int32Array(200)), LB = Array.from({ length: 64 }, () => new Int32Array(200));
+        const SVC = new Int8Array(256), SVT = new Int8Array(256), SVH = new Uint8Array(256), SVS = new Int8Array(256), SVM = new Uint8Array(256), SVV = new Int32Array(256);
+        let sp = 0, PO = null, PN = 0, PCOL = 0, lastIt = 0;
+
+        function fLoad(b) {
+            for (let r = 0; r < 10; r++) for (let c = 0; c < 9; c++) {
+                const i = r * 9 + c, p = b[r][c];
+                if (!p) { FC[i] = 0; FH[i] = 0; continue; }
+                FC[i] = p.color === RED ? 1 : 2; FT[i] = TY[p.trueType]; FH[i] = p.isHidden ? 1 : 0; FS[i] = TY[p.startRole];
+                if (!p.isHidden && p.trueType === 'K') KP[FC[i]] = i;
+            }
+        }
+        function fPal(i, col) { const r = SR[i], c = SC[i]; return c >= 3 && c <= 5 && (col === 1 ? r >= 7 : r <= 2); }
+        function fAdd(f, t) { if (FC[t] !== PCOL) PO[PN++] = f | (t << 7); }
+        function fPseudo(f) {
+            const col = FC[f], role = FH[f] ? FS[f] : FT[f], r = SR[f], c = SC[f];
+            if (role === 1) { for (let d = 0; d < 4; d++) { const nr = r + DR4[d], nc = c + DC4[d], t = nr * 9 + nc; if (nr >= 0 && nr < 10 && nc >= 0 && nc < 9 && fPal(t, col)) fAdd(f, t); } }
+            else if (role === 2 || role === 3) {
+                for (let d = 0; d < 4; d++) {
+                    let nr = r + DR4[d], nc = c + DC4[d], jumped = false;
+                    while (nr >= 0 && nr < 10 && nc >= 0 && nc < 9) {
+                        const t = nr * 9 + nc;
+                        if (role === 2) { fAdd(f, t); if (FC[t]) break; }
+                        else if (!jumped) { if (!FC[t]) fAdd(f, t); else jumped = true; }
+                        else if (FC[t]) { fAdd(f, t); break; }
+                        nr += DR4[d]; nc += DC4[d];
+                    }
+                }
+            } else if (role === 4) {
+                for (const j of HJ) { const nr = r + j[0], nc = c + j[1]; if (nr >= 0 && nr < 10 && nc >= 0 && nc < 9 && !FC[(r + j[2]) * 9 + c + j[3]]) fAdd(f, nr * 9 + nc); }
+            } else if (role === 5) {
+                for (let a = -2; a <= 2; a += 4) for (let b2 = -2; b2 <= 2; b2 += 4) {
+                    const nr = r + a, nc = c + b2;
+                    if (nr < 0 || nr > 9 || nc < 0 || nc > 8 || FC[(r + a / 2) * 9 + c + b2 / 2]) continue;
+                    if (variant === 'tuong' && (col === 1 ? nr < 5 : nr > 4)) continue;
+                    fAdd(f, nr * 9 + nc);
+                }
+            } else if (role === 6) {
+                for (let a = -1; a <= 1; a += 2) for (let b2 = -1; b2 <= 1; b2 += 2) {
+                    const nr = r + a, nc = c + b2, t = nr * 9 + nc;
+                    if (nr < 0 || nr > 9 || nc < 0 || nc > 8) continue;
+                    if ((FH[f] || variant === 'tuong') && !fPal(t, col)) continue;
+                    fAdd(f, t);
+                }
+            } else {
+                const dir = col === 1 ? -1 : 1, fr = r + dir;
+                if (fr >= 0 && fr < 10) fAdd(f, fr * 9 + c);
+                if (col === 1 ? r <= 4 : r >= 5) { if (c > 0) fAdd(f, r * 9 + c - 1); if (c < 8) fAdd(f, r * 9 + c + 1); }
+            }
+        }
+        function fMake(m) {
+            const f = m & 127, t = m >> 7;
+            SVC[sp] = FC[t]; SVT[sp] = FT[t]; SVH[sp] = FH[t]; SVS[sp] = FS[t]; SVM[sp] = FH[f]; SVV[sp] = m; sp++;
+            FC[t] = FC[f]; FT[t] = FT[f]; FS[t] = FS[f]; FH[t] = 0; FC[f] = 0; FH[f] = 0;
+            if (FT[t] === 1) KP[FC[t]] = t;
+        }
+        function fUnmake() {
+            sp--; const m = SVV[sp], f = m & 127, t = m >> 7;
+            FC[f] = FC[t]; FT[f] = FT[t]; FS[f] = FS[t]; FH[f] = SVM[sp];
+            FC[t] = SVC[sp]; FT[t] = SVT[sp]; FH[t] = SVH[sp]; FS[t] = SVS[sp];
+            if (FT[f] === 1) KP[FC[f]] = f;
+        }
+        function fCheck(col) {
+            const k = KP[col], kr = SR[k], kc = SC[k], opp = 3 - col, o = KP[opp];
+            if (SC[o] === kc) { let a = Math.min(kr, SR[o]) + 1, z = Math.max(kr, SR[o]), ok = true; for (; a < z; a++) if (FC[a * 9 + kc]) { ok = false; break; } if (ok) return true; }
+            for (let d = 0; d < 4; d++) {
+                let r = kr + DR4[d], c = kc + DC4[d], scr = false;
+                while (r >= 0 && r < 10 && c >= 0 && c < 9) {
+                    const i = r * 9 + c;
+                    if (FC[i]) {
+                        const rl = FH[i] ? FS[i] : FT[i];
+                        if (!scr) { if (FC[i] === opp && rl === 2) return true; scr = true; }
+                        else { if (FC[i] === opp && rl === 3) return true; break; }
+                    }
+                    r += DR4[d]; c += DC4[d];
+                }
+            }
+            for (const j of HJ) {
+                const hr = kr - j[0], hc = kc - j[1];
+                if (hr < 0 || hr > 9 || hc < 0 || hc > 8) continue;
+                const i = hr * 9 + hc;
+                if (FC[i] === opp && (FH[i] ? FS[i] : FT[i]) === 4 && !FC[(hr + j[2]) * 9 + hc + j[3]]) return true;
+            }
+            const dir = opp === 1 ? -1 : 1, fr = kr - dir;
+            if (fr >= 0 && fr < 10) { const i = fr * 9 + kc; if (FC[i] === opp && (FH[i] ? FS[i] : FT[i]) === 7) return true; }
+            if (opp === 1 ? kr <= 4 : kr >= 5) for (let dc = -1; dc <= 1; dc += 2) { const c = kc + dc; if (c >= 0 && c < 9) { const i = kr * 9 + c; if (FC[i] === opp && (FH[i] ? FS[i] : FT[i]) === 7) return true; } }
+            if (variant === 'up') for (let a = -1; a <= 1; a += 2) for (let b2 = -1; b2 <= 1; b2 += 2) {
+                const ar = kr + a, ac = kc + b2;
+                if (ar >= 0 && ar < 10 && ac >= 0 && ac < 9) { const i = ar * 9 + ac; if (FC[i] === opp && !FH[i] && FT[i] === 6) return true; }
+                const er = kr + 2 * a, ec = kc + 2 * b2;
+                if (er >= 0 && er < 10 && ec >= 0 && ec < 9 && !FC[ar * 9 + ac]) { const i = er * 9 + ec; if (FC[i] === opp && (FH[i] ? FS[i] : FT[i]) === 5) return true; }
+            }
+            return false;
+        }
+        function fLegal(col, out, ply) {
+            const tmp = MB[ply]; PO = tmp; PN = 0; PCOL = col;
+            for (let i = 0; i < 90; i++) if (FC[i] === col) fPseudo(i);
+            const cnt = PN; let n = 0;
+            for (let k = 0; k < cnt; k++) { const m = tmp[k]; fMake(m); if (!fCheck(col)) out[n++] = m; fUnmake(); }
+            return n;
+        }
+        function fEval() {
+            let s = 0;
+            for (let i = 0; i < 90; i++) {
+                const col = FC[i]; if (!col) continue;
+                const r = SR[i], c = SC[i]; let v;
+                if (FH[i]) { v = hidVal[col === 1 ? 'r' : 'b'] + (TV[FS[i]] - 349) * 0.1; if (col === 2) v += 6; }
+                else {
+                    const t = FT[i]; if (t === 1) continue;
+                    v = TV[t]; const cr = col === 1 ? r <= 4 : r >= 5;
+                    if (t === 7) { if (cr) v += 65 + 5 * (col === 1 ? 4 - r : r - 5) + (c >= 3 && c <= 5 ? 5 : 0); }
+                    else {
+                        if (cr && t !== 5 && t !== 6) v += 8;
+                        if (t === 4) v += 3 * (4 - Math.abs(c - 4)) - (c === 0 || c === 8 ? 12 : 0);
+                        if (t === 3 && c === 4) v += 18;
+                    }
+                }
+                s += col === 2 ? v : -v;
+            }
+            return s;
+        }
+        function fQs(col, alpha, beta, d, ply) {
+            const stand = fEval() * (col === 2 ? 1 : -1);
+            if (d === 0 || ply > 60 || stand >= beta) return stand;
+            if (stand > alpha) alpha = stand;
+            const tmp = MB[ply]; PO = tmp; PN = 0; PCOL = col;
+            for (let i = 0; i < 90; i++) if (FC[i] === col) fPseudo(i);
+            const caps = LB[ply], key = [];
+            let n = 0;
+            for (let k = 0; k < PN; k++) { const m = tmp[k], t = m >> 7; if (FC[t]) { caps[n] = m; key[n++] = (FH[t] ? hidVal[FC[t] === 1 ? 'r' : 'b'] : TV[FT[t]]) * 10 - TV[FH[m & 127] ? FS[m & 127] : FT[m & 127]]; } }
+            let best = stand;
+            for (let j = 0; j < n; j++) {
+                let bi = j; for (let k = j + 1; k < n; k++) if (key[k] > key[bi]) bi = k;
+                const m = caps[bi]; caps[bi] = caps[j]; caps[j] = m; const kk = key[bi]; key[bi] = key[j]; key[j] = kk;
+                fMake(m);
+                if (fCheck(col)) { fUnmake(); continue; }
+                const v = -fQs(3 - col, -beta, -alpha, d - 1, ply + 1);
+                fUnmake();
+                if (v > best) { best = v; if (v > alpha) alpha = v; if (alpha >= beta) break; }
+            }
+            return best;
+        }
+        const fSig = (x) => 1 / (1 + Math.exp(-x / 350));
+
+        // Trả về nước đi cho Đen (hoặc null nếu lỗi để dùng thuật toán dự phòng). variety: độ "tự nhiên" (cho phép chọn nước gần ngang điểm)
+        function mctsPick(mvs, ms, variety) {
+            try {
+                const allowed = new Set(mvs.map(m => (m.fromR * 9 + m.fromC) | ((m.toR * 9 + m.toC) << 7)));
+                const root = { n: 0, ch: new Map() }, path = [], deadline = Date.now() + ms;
+                let it = 0;
+                while (true) {
+                    if ((it & 15) === 0 && Date.now() > deadline) break;
+                    it++;
+                    fLoad(determinizeBoard()); sp = 0;
+                    let node = root, col = 2, ply = 0, p = -1; path.length = 0;
+                    for (;;) {
+                        const mb = LB[ply]; let n = fLegal(col, mb, ply);
+                        if (ply === 0) { let k = 0; for (let j = 0; j < n; j++) if (allowed.has(mb[j])) mb[k++] = mb[j]; n = k; }
+                        if (n === 0) { p = col === 2 ? 0 : 1; break; }
+                        if (ply >= 36) { const v = fQs(col, -1e5, 1e5, 3, ply + 1); p = fSig(col === 2 ? v : -v); break; }
+                        let unexp = -1, tot = 0;
+                        for (let j = 0; j < n; j++) if (!node.ch.has(mb[j])) { const w = FC[mb[j] >> 7] ? 4 : 1; tot += w; if (Math.random() * tot < w) unexp = mb[j]; }
+                        if (unexp >= 0) {
+                            const ch = { n: 0, w: 0, av: 1, mover: col, ch: new Map() };
+                            node.ch.set(unexp, ch); fMake(unexp); path.push(ch);
+                            const v = fQs(3 - col, -1e5, 1e5, 3, ply + 1); p = fSig(col === 2 ? -v : v);
+                            break;
+                        }
+                        let bm = 0, bv = -1, bc = null;
+                        for (let j = 0; j < n; j++) {
+                            const ch = node.ch.get(mb[j]); ch.av++;
+                            const u = ch.w / ch.n + 0.7 * Math.sqrt(Math.log(ch.av) / ch.n);
+                            if (u > bv) { bv = u; bm = mb[j]; bc = ch; }
+                        }
+                        fMake(bm); path.push(bc); node = bc; col = 3 - col; ply++;
+                    }
+                    root.n++;
+                    for (const ch of path) { ch.n++; ch.w += ch.mover === 2 ? p : 1 - p; }
+                }
+                lastIt = it;
+                let bestN = 0, bestV = 0;
+                for (const ch of root.ch.values()) if (ch.n > bestN) { bestN = ch.n; bestV = ch.w / ch.n; }
+                if (!bestN) return null;
+                const cand = []; let tot = 0;
+                for (const [m, ch] of root.ch) if (ch.n >= bestN * 0.3 && ch.w / ch.n >= bestV - variety) { cand.push([m, ch.n]); tot += ch.n; }
+                let x = Math.random() * tot, pick = cand[0][0];
+                for (const [m, nn] of cand) { x -= nn; if (x <= 0) { pick = m; break; } }
+                return mvs.find(m => ((m.fromR * 9 + m.fromC) | ((m.toR * 9 + m.toC) << 7)) === pick) || null;
+            } catch (e) { return null; }
+        }
+
+        
         const HIST_KEY = 'co_tuong_up_history_v1', PROF_KEY = 'co_tuong_up_profile_v1';
         let skill = 0.25; // trình độ người chơi ước lượng, 0..1
         try { const q = JSON.parse(localStorage.getItem(PROF_KEY)); if (q && typeof q.skill === 'number') skill = q.skill; } catch (e) {}
@@ -1547,10 +1748,10 @@
                 }
             } else if (lv === 4) {
                 // Khó: nhìn trước ~3 nước, hiểu thế trận (giữ quân, bó hẹp đối thủ, áp lực lên Tướng)
-                chosen = voteSearch(mvs, 3, 900, 3);
+                chosen = mctsPick(mvs, 1200, 0.03) || voteSearch(mvs, 3, 900, 3);
             } else {
                 // Rất khó: tìm sâu dần theo thời gian (tối đa ~2 giây), hiểu thế trận, ưu tiên nước ăn quân
-                chosen = voteSearch(mvs, lv === 6 ? 5 : 3, lv === 6 ? 4500 : 2400, lv === 6 ? 10 : 7);
+                chosen = mctsPick(mvs, lv === 6 ? 4000 : 2200, lv === 6 ? 0.01 : 0.02) || voteSearch(mvs, lv === 6 ? 5 : 3, lv === 6 ? 4500 : 2400, lv === 6 ? 10 : 7);
             }
 
             // Người thật thỉnh thoảng đi nước khác (vẫn hợp lý, không phải nước ngớ ngẩn); Cao thủ thì không lỡ tay
