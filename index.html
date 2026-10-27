@@ -641,6 +641,7 @@
             gameOver = false;
             aiBusy = false;
             aiToken++;
+            anim = null;
             capturedByRed = [];
             capturedByBlack = [];
 
@@ -960,6 +961,7 @@
 
             const moving = board[fromR][fromC];
             const target = board[toR][toC];
+            const wasHiddenMove = moving.isHidden;
             moving.isHidden = false;
 
             if (target) {
@@ -972,6 +974,7 @@
             lastMove = { fromR, fromC, toR, toC };
             selected = null;
             validMoves = [];
+            startMoveAnim(fromR, fromC, toR, toC, moving, target, wasHiddenMove);
 
             turn = turn === RED ? BLACK : RED;
 
@@ -986,6 +989,17 @@
                 drawBoard();
                 if (moving.color === BLACK) startPulse();
                 showGameOver(moving.color);
+                return;
+            }
+
+            const drawWhy = drawReason();
+            if (drawWhy) {
+                gameOver = true;
+                saveGameState();
+                playTone('select');
+                updateStatusUI();
+                drawBoard();
+                showGameOver('draw', drawWhy);
                 return;
             }
 
@@ -1012,6 +1026,7 @@
             if (mode === 'ai' && snap.turn === BLACK && historyStack.length > 0) {
                 snap = historyStack.pop();
             }
+            anim = null;
             board = snap.board;
             turn = snap.turn;
             lastMove = snap.lastMove;
@@ -1047,6 +1062,32 @@
             let s = 0;
             for (const row of b) for (const p of row) if (p && !(p.trueType === 'K' && !p.isHidden)) s += p.color === BLACK ? pv(p) : -pv(p);
             return s;
+        }
+
+        // Thế sát trên bàn dạng đối tượng (cùng ý với fSha): Tướng lộ mặt, Pháo đầu + Mã đội, Xe + Pháo cô lập Tướng
+        function shaObj(b) {
+            const kg = { r: findKing(b, RED), b: findKing(b, BLACK) };
+            if (!kg.r || !kg.b) return 0;
+            const S = { r: { R: 0, C: 0, Hn: 0, Cf: 0, Rl: 0, G: 0 }, b: { R: 0, C: 0, Hn: 0, Cf: 0, Rl: 0, G: 0 } };
+            for (let r = 0; r < 10; r++) for (let c = 0; c < 9; c++) {
+                const p = b[r][c]; if (!p) continue;
+                const my = S[p.color], own = kg[p.color], ek = kg[p.color === RED ? BLACK : RED];
+                if (p.isHidden) { if (Math.abs(r - own.r) <= 2 && Math.abs(c - own.c) <= 2) my.G += 0.5; continue; }
+                const t = p.trueType;
+                if (t === 'E' || t === 'A') my.G += 1;
+                else if (t === 'R') { my.R++; if (r === ek.r || c === ek.c) my.Rl++; }
+                else if (t === 'C') { my.C++; if (c === ek.c) my.Cf++; }
+                else if (t === 'H' && Math.abs(r - ek.r) <= 3 && Math.abs(c - ek.c) <= 3) my.Hn++;
+            }
+            let sc = 0;
+            for (const a of [RED, BLACK]) {
+                const m = S[a], d = S[a === RED ? BLACK : RED]; let v = 0;
+                if (d.G < 2 && m.R + m.C > 0) v += (2 - d.G) * 18 * Math.min(2, m.R + m.C);
+                if (m.Cf) { v += 10; if (m.Hn) v += 25; }
+                if (m.R && m.C && (m.Rl || m.Cf)) v += 25;
+                sc += a === BLACK ? v : -v;
+            }
+            return sc;
         }
 
         function evaluateBoard(b) {
@@ -1148,6 +1189,8 @@
                     } else if ((t === 'A' || t === 'E') && strong[opp] >= 2) pos = 10; // giữ Sĩ Tượng khi đối phương còn nhiều quân mạnh
                     if (t === 'R' || t === 'H' || t === 'C') { if (col === RED ? it.r <= 4 : it.r >= 5) pos += 8; }
                     if (t === 'H') pos += 3 * (4 - Math.abs(it.c - 4));
+                    if (t === 'R' && it.c >= 3 && it.c <= 5) pos += 6;
+                    if (t === 'H') for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) { const rr = it.r + dr, cc = it.c + dc; if (rr >= 0 && rr < 10 && cc >= 0 && cc < 9 && b[rr][cc]) pos -= 6; }
                     if (pos) score += col === BLACK ? pos : -pos;
                 }
 
@@ -1156,6 +1199,7 @@
                 for (const it of pieces) if (it.p.isHidden && it.p.color === BLACK) hb++;
                 score += 6 * hb;
             }
+            score += shaObj(b) * (lvl <= 2 ? 0.5 : 1);
             return score;
         }
 
@@ -1607,6 +1651,30 @@
                 }
                 s += col === 2 ? v : -v;
             }
+            return s + fSha();
+        }
+        // Thế sát cơ bản (chỉ tính quân đã lật): Tướng thiếu Sĩ/Tượng che chắn khi địch còn Xe/Pháo; Pháo đầu + Mã đội; Xe + Pháo cô lập Tướng
+        function fSha() {
+            const K = [0, KP[1], KP[2]];
+            const R = [0, 0, 0], C = [0, 0, 0], Hn = [0, 0, 0], Cf = [0, 0, 0], Rl = [0, 0, 0], G = [0, 0, 0];
+            for (let i = 0; i < 90; i++) {
+                const col = FC[i]; if (!col) continue;
+                const r = SR[i], c = SC[i], ek = K[3 - col], own = K[col];
+                if (FH[i]) { if (Math.abs(r - SR[own]) <= 2 && Math.abs(c - SC[own]) <= 2) G[col] += 0.5; continue; } // quân úp gần Tướng: coi như có thể là Sĩ/Tượng
+                const t = FT[i];
+                if (t === 5 || t === 6) G[col] += 1;
+                else if (t === 2) { R[col]++; if (r === SR[ek] || c === SC[ek]) Rl[col]++; }
+                else if (t === 3) { C[col]++; if (c === SC[ek]) Cf[col]++; }
+                else if (t === 4 && Math.abs(r - SR[ek]) <= 3 && Math.abs(c - SC[ek]) <= 3) Hn[col]++;
+            }
+            let s = 0;
+            for (let a = 1; a <= 2; a++) {
+                const d = 3 - a; let v = 0;
+                if (G[d] < 2 && R[a] + C[a] > 0) v += (2 - G[d]) * 18 * Math.min(2, R[a] + C[a]); // Tướng lộ mặt
+                if (Cf[a]) { v += 10; if (Hn[a]) v += 25; }                                      // Pháo đầu + Mã đội
+                if (R[a] && C[a] && (Rl[a] || Cf[a])) v += 25;                                  // Xe + Pháo cô lập Tướng
+                s += a === 2 ? v : -v;
+            }
             return s;
         }
         function fQs(col, alpha, beta, d, ply) {
@@ -1632,6 +1700,85 @@
         }
         const fSig = (x) => 1 / (1 + Math.exp(-x / 350));
 
+        // ===== Chiến thuật riêng của Cờ Úp: chỉnh nhẹ điểm các nước lật quân (cộng/trừ theo tỷ lệ thắng) =====
+        function poolBlack() { return (typeof SNAP !== 'undefined' && SNAP) ? SNAP.pool.b : unknownPool(BLACK); }
+        function firstOn(f, d) {
+            let r = SR[f] + DR4[d], c = SC[f] + DC4[d];
+            while (r >= 0 && r < 10 && c >= 0 && c < 9) { if (FC[r * 9 + c]) return r * 9 + c; r += DR4[d]; c += DC4[d]; }
+            return -1;
+        }
+        function flipBias(m) {
+            const f = m & 127;
+            if (!FH[f]) return 0;
+            const pool = poolBlack(), n = pool.length;
+            let rc = 0, pa = 0;
+            for (const x of pool) { if (x === 'R' || x === 'C') rc++; else if (x === 'P' || x === 'A') pa++; }
+            const sr = FS[f], c = SC[f];
+            let b = 0;
+            // Nhiều khả năng lật ra Xe/Pháo (>40%): ưu tiên mở ở ô thông thoáng (Mã, Tượng, Tốt biên/giữa)
+            if (n && rc / n > 0.4 && (sr === 4 || sr === 5 || (sr === 7 && (c === 0 || c === 4 || c === 8)))) b += 0.02;
+            // Trong hộp chỉ còn Tốt/Sĩ: mở nắp ít giá trị, không nên tốn nước
+            if (n && pa === n) b -= 0.03;
+            // Quân đang che giữa Xe địch (đã lật) và Tướng/quân lớn của mình: mở nắp sẽ để lộ đường ngắm
+            for (const [d0, d1] of [[0, 1], [2, 3]]) {
+                const a = firstOn(f, d0), z = firstOn(f, d1);
+                if (a < 0 || z < 0) continue;
+                for (const [x, y] of [[a, z], [z, a]]) {
+                    if (FC[x] === 1 && !FH[x] && FT[x] === 2 && FC[y] === 2 && (FT[y] === 1 || (!FH[y] && TV[FT[y]] >= 420))) b -= 0.06;
+                }
+            }
+            // Vừa lật vừa chiếu Tướng
+            fMake(m); const chk = fCheck(1); fUnmake();
+            if (chk) b += 0.015;
+            return b;
+        }
+
+        function rcAttack(sq, by) { // ô sq có bị Xe (đã lật) hoặc Pháo (đã lật, qua 1 ngòi) của phe "by" ngắm tới không
+            const r0 = SR[sq], c0 = SC[sq];
+            for (let d = 0; d < 4; d++) {
+                let r = r0 + DR4[d], c = c0 + DC4[d], scr = false;
+                while (r >= 0 && r < 10 && c >= 0 && c < 9) {
+                    const i = r * 9 + c;
+                    if (FC[i]) {
+                        if (!scr) { if (FC[i] === by && !FH[i] && FT[i] === 2) return true; scr = true; }
+                        else { if (FC[i] === by && !FH[i] && FT[i] === 3) return true; break; }
+                    }
+                    r += DR4[d]; c += DC4[d];
+                }
+            }
+            return false;
+        }
+        function tactBias(m, E0) {
+            const f = m & 127, t = m >> 7, wasH = FH[f];
+            fMake(m);
+            const tmp = MB[62]; PO = tmp; PN = 0; PCOL = 2; fPseudo(t);
+            let big = 0, hitK = false;
+            for (let k = 0; k < PN; k++) { const q = tmp[k] >> 7; if (FC[q] === 1) { if (q === KP[1]) hitK = true; else if (!FH[q] && TV[FT[q]] >= 420) big++; } }
+            let b = 0;
+            if (big >= 2 && -fQs(1, -1e5, 1e5, 2, 40) >= E0 - 20) b += 0.03; // bắt đôi thật: 2 quân lớn bị đe doạ mà quân đi không bị ăn mất giá
+            if (fCheck(1) && !hitK) b += 0.04;             // chiếu mở: quân vừa đi không tự chiếu, đường chiếu do nó rời ô mà mở ra
+            if (wasH) { b *= 1.5; if (rcAttack(t, 1)) b -= 0.04; } // lật vào ô đang bị Xe/Pháo địch ngắm: dễ mất quân mà chưa biết là quân gì
+            fUnmake();
+            return b;
+        }
+        // Dụ đối thủ: đặt 1 quân "mồi" mà nếu địch ăn ngay (nước hấp dẫn) thì địch lỗ sau khi mình ăn lại
+        function lureBias(m, E0) {
+            fMake(m);
+            const tmp = MB[61]; PO = tmp; PN = 0; PCOL = 1;
+            for (let i = 0; i < 90; i++) if (FC[i] === 1) fPseudo(i);
+            const caps = [];
+            for (let k = 0; k < PN; k++) if (FC[tmp[k] >> 7] === 2) caps.push(tmp[k]);
+            let tempting = 0, poisoned = 0;
+            for (const c of caps) {
+                const q = c >> 7, gain = FH[q] ? hidVal.b : TV[FT[q]];
+                if (gain < 100) continue;
+                fMake(c);
+                if (!fCheck(1)) { tempting++; if (fQs(2, -1e5, 1e5, 2, 40) >= E0 + 30) poisoned++; }
+                fUnmake();
+            }
+            fUnmake();
+            return tempting > 0 && poisoned === tempting ? 0.03 : 0;
+        }
         // Trả về nước đi cho Đen (hoặc null nếu lỗi để dùng thuật toán dự phòng). variety: độ "tự nhiên" (cho phép chọn nước gần ngang điểm)
         function mctsPick(mvs, ms, variety) {
             try {
@@ -1674,11 +1821,15 @@
                     for (const ch of path) { ch.n++; ch.w += ch.mover === 2 ? p : 1 - p; }
                 }
                 lastIt = it;
-                let bestN = 0, bestV = 0;
-                for (const ch of root.ch.values()) if (ch.n > bestN) { bestN = ch.n; bestV = ch.w / ch.n; }
+                let bestN = 0;
+                for (const ch of root.ch.values()) if (ch.n > bestN) bestN = ch.n;
                 if (!bestN) return null;
+                fLoad(determinizeBoard()); sp = 0; // quân đã lật giống hệt mọi cách chia bài nên dùng để chấm thêm điểm chiến thuật
+                const E0 = fEval();
+                const adj = new Map(); let bestA = -9;
+                for (const [m, ch] of root.ch) if (ch.n >= bestN * 0.3) { const a = ch.w / ch.n + flipBias(m) + tactBias(m, E0) + lureBias(m, E0); adj.set(m, a); if (a > bestA) bestA = a; }
                 const cand = []; let tot = 0;
-                for (const [m, ch] of root.ch) if (ch.n >= bestN * 0.3 && ch.w / ch.n >= bestV - variety) { cand.push([m, ch.n]); tot += ch.n; }
+                for (const [m, a] of adj) if (a >= bestA - variety) { const nn = root.ch.get(m).n; cand.push([m, nn]); tot += nn; }
                 let x = Math.random() * tot, pick = cand[0][0];
                 for (const [m, nn] of cand) { x -= nn; if (x <= 0) { pick = m; break; } }
                 return mvs.find(m => ((m.fromR * 9 + m.fromC) | ((m.toR * 9 + m.toC) << 7)) === pick) || null;
@@ -1731,6 +1882,47 @@
             return c === undefined ? mctsPick(mvs, ms, variety) : c;
         }
 
+        // ===== Khai cuộc: mỗi ván chọn ngẫu nhiên 1 "phong cách" (có trọng số), đi theo vài nước đầu nếu hợp lệ và không hớ =====
+        // Toạ độ [hàng đi, cột đi, hàng đến, cột đến]. Máy cầm quân Đen ở phía trên bàn.
+        const BOOK_T = [ // Cờ tướng: w = trọng số thường, wc = trọng số khi Đỏ khai Pháo đầu
+            { n: 'Bình phong mã', w: 2, wc: 3, mv: [[0,7,2,6],[0,1,2,2],[0,8,1,8],[0,0,1,0],[3,2,4,2]] },
+            { n: 'Phản công mã', w: 0, wc: 3, mv: [[0,7,2,6],[3,6,4,6],[0,1,2,2],[0,8,1,8]] },
+            { n: 'Thuận pháo', w: 2, wc: 0, mv: [[2,7,2,4],[0,7,2,6],[0,1,2,2],[0,8,1,8]] },
+            { n: 'Nghịch pháo', w: 1, wc: 0, mv: [[2,1,2,4],[0,1,2,2],[0,7,2,6],[0,0,1,0]] },
+            { n: 'Tiên nhân chỉ lộ', w: 2, wc: 0, mv: [[3,6,4,6],[0,1,2,2],[0,7,2,6],[0,8,1,8],[0,0,1,0]] },
+            { n: 'Phi tượng', w: 1, wc: 0, mv: [[0,2,2,4],[0,1,2,2],[0,7,2,6]] }
+        ];
+        const BOOK_U = [ // Cờ úp: quân úp đi theo nước của ô xuất phát
+            { n: 'Thúc Tốt 3-7', w: 3, wc: 3, mv: [[3,2,4,2],[3,6,4,6],[0,3,1,4],[0,5,1,4]] },
+            { n: 'Lên Sĩ mở nắp', w: 2, wc: 2, mv: [[0,3,1,4],[3,2,4,2],[0,5,1,4],[3,6,4,6]] },
+            { n: 'Lên Tượng', w: 2, wc: 2, mv: [[0,2,2,4],[3,6,4,6],[0,6,2,4],[3,2,4,2]] },
+            { n: 'Thúc Tốt biên', w: 1, wc: 1, mv: [[3,0,4,0],[3,8,4,8],[3,2,4,2]] },
+            { n: 'Pháo giữa', w: 1, wc: 1, mv: [[2,1,2,4],[3,6,4,6],[2,7,2,4]] }
+        ];
+        let bookLine = null, bookName = '';
+        function pickBookLine() {
+            const L = variant === 'tuong' ? BOOK_T : BOOK_U;
+            const t = lastMove && board[lastMove.toR][lastMove.toC];
+            const central = !!(variant === 'tuong' && t && t.trueType === 'C' && lastMove.toR === 7 && lastMove.toC === 4);
+            let tot = 0; for (const e of L) tot += central ? e.wc : e.w;
+            let x = Math.random() * tot, pick = L[0];
+            for (const e of L) { x -= central ? e.wc : e.w; if (x <= 0) { pick = e; break; } }
+            bookName = pick.n;
+            return pick.mv.map(a => ({ a, used: false }));
+        }
+        function bookMove(mvs, det) {
+            let top = null;
+            for (const c of bookLine) {
+                if (c.used) continue;
+                const m = mvs.find(x => x.fromR === c.a[0] && x.fromC === c.a[1] && x.toR === c.a[2] && x.toC === c.a[3]);
+                if (!m) continue;
+                c.used = true;
+                if (top === null) top = Math.max(...mvs.map(x => minimax(simMove(det, x), 1, -Infinity, Infinity, false)));
+                if (minimax(simMove(det, m), 1, -Infinity, Infinity, false) >= top - 70) return m; // không hớ quân thì mới theo sách
+            }
+            return null;
+        }
+
         const HIST_KEY = 'co_tuong_up_history_v1', PROF_KEY = 'co_tuong_up_profile_v1';
         let skill = 0.25; // trình độ người chơi ước lượng, 0..1
         try { const q = JSON.parse(localStorage.getItem(PROF_KEY)); if (q && typeof q.skill === 'number') skill = q.skill; } catch (e) {}
@@ -1739,7 +1931,7 @@
             try {
                 const n = historyStack.length;
                 if (mode === 'ai' && difficulty === 7) {
-                    skill = Math.max(0, Math.min(1, skill + (winner === RED ? (n < 50 ? 0.15 : 0.1) : -0.1)));
+                    if (winner !== 'draw') skill = Math.max(0, Math.min(1, skill + (winner === RED ? (n < 50 ? 0.15 : 0.1) : -0.1)));
                     localStorage.setItem(PROF_KEY, JSON.stringify({ skill }));
                 }
                 const h = JSON.parse(localStorage.getItem(HIST_KEY) || '[]');
@@ -1763,7 +1955,7 @@
             try { h = JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); } catch (e) {}
             const nm = { 2: 'Dễ', 3: 'Vừa', 4: 'Khó', 5: 'Rất khó', 6: 'Cao thủ' };
             el.innerHTML = '<div class="font-extrabold text-amber-200">📜 Lịch sử ván đấu</div>' + (h.length
-                ? h.slice(-8).reverse().map(g => `<div class="text-amber-100">${new Date(g.t).toLocaleDateString('vi-VN')} · ${g.m === 'pvp' ? '2 người' : (g.a ? 'Tự động ' : 'Máy ') + (nm[g.lv] || '')} · ${g.w === RED ? 'Đỏ thắng' : 'Đen thắng'} · ${g.n} nước</div>`).join('')
+                ? h.slice(-8).reverse().map(g => `<div class="text-amber-100">${new Date(g.t).toLocaleDateString('vi-VN')} · ${g.m === 'pvp' ? '2 người' : (g.a ? 'Tự động ' : 'Máy ') + (nm[g.lv] || '')} · ${g.w === 'draw' ? 'Hòa' : g.w === RED ? 'Đỏ thắng' : 'Đen thắng'} · ${g.n} nước</div>`).join('')
                 : '<div class="text-amber-100 opacity-70">Chưa có ván nào</div>');
         }
 
@@ -1801,7 +1993,12 @@
             let chosen = mvs[0];
             hist.fill(0);
 
-            if (lv <= 2) {
+            if (historyStack.length <= 1 || !bookLine) bookLine = pickBookLine(); // chọn phong cách ngay nước đầu, dựa trên nước đi đầu của Đỏ
+            let booked = null;
+            if (lv >= 3 && historyStack.length < 11 && Math.random() < 0.8) booked = bookMove(mvs, det);
+            if (booked) {
+                chosen = booked;
+            } else if (lv <= 2) {
                 // Dễ: nhìn 1 nước, hay nhầm
                 let best = -Infinity;
                 // Đầu ván, phần lớn lượt máy bỏ qua nước ăn quân (không ván nào cũng lao vào ăn ngay)
@@ -2008,6 +2205,39 @@
             ctx.restore();
         }
 
+        // ===== Hoạt ảnh: quân trượt 160ms (ease-out) rồi, nếu là quân úp, lật mở nắp 150ms (co ngang 1 -> 0 -> 1) =====
+        let anim = null;
+        const REDUCE_MOTION = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches === true;
+        function startMoveAnim(fr, fc, tr, tc, piece, target, wasHidden) {
+            if (REDUCE_MOTION) return;
+            const a = { fr, fc, tr, tc, piece, target, wasHidden, t0: Date.now(), slide: 160, flip: wasHidden ? 150 : 0 };
+            anim = a;
+            const step = () => {
+                if (anim !== a) return;
+                if (Date.now() - a.t0 >= a.slide + a.flip) { anim = null; drawBoard(); return; }
+                drawBoard();
+                requestAnimationFrame(step);
+            };
+            requestAnimationFrame(step);
+        }
+        function drawAnim() {
+            const a = anim; if (!a) return;
+            const el = Date.now() - a.t0, rad = cellSize * 0.465;
+            const hiddenFace = Object.assign({}, a.piece, { isHidden: true });
+            if (el < a.slide) {
+                const u = el / a.slide, e = 1 - (1 - u) * (1 - u);
+                const p0 = getXY(a.fr, a.fc), p1 = getXY(a.tr, a.tc);
+                if (a.target) drawPieceOn(ctx, p1.x, p1.y, rad, a.target); // quân bị ăn còn nằm đó cho tới khi quân đi tới nơi
+                drawPieceOn(ctx, p0.x + (p1.x - p0.x) * e, p0.y + (p1.y - p0.y) * e, rad * (1 + 0.08 * Math.sin(Math.PI * u)), a.wasHidden ? hiddenFace : a.piece);
+            } else {
+                const u = Math.min(1, (el - a.slide) / a.flip), p1 = getXY(a.tr, a.tc);
+                const sx = Math.max(0.03, Math.abs(Math.cos(Math.PI * u)));
+                ctx.save(); ctx.translate(p1.x, 0); ctx.scale(sx, 1); ctx.translate(-p1.x, 0);
+                drawPieceOn(ctx, p1.x, p1.y, rad, u < 0.5 ? hiddenFace : a.piece);
+                ctx.restore();
+            }
+        }
+
         function drawBoard() {
             const w = cellSize * 8 + padX * 2;
             const h = cellSize * 9 + padY * 2;
@@ -2107,9 +2337,10 @@
             // Draw All Pieces
             for (let r = 0; r < 10; r++) {
                 for (let c = 0; c < 9; c++) {
-                    if (board[r][c]) drawPiece(r, c, board[r][c]);
+                    if (board[r][c] && !(anim && r === anim.tr && c === anim.tc)) drawPiece(r, c, board[r][c]);
                 }
             }
+            drawAnim();
 
             drawMachineMoveOver();
 
@@ -2363,8 +2594,33 @@
             renderTray(capturedByBlack, 'blackCapturedList');
         }
 
-        function showGameOver(winner) {
+        // ===== Luật hòa: lặp thế 3 lần, hoặc 120 nước (60 nước mỗi bên) không ăn quân và không lật quân =====
+        function hiddenCount(b) { let n = 0; for (const row of b) for (const p of row) if (p && p.isHidden) n++; return n; }
+        function noProgressPlies() {
+            const cr = capturedByRed.length, cb = capturedByBlack.length, hc = hiddenCount(board);
+            let n = 0;
+            for (let i = historyStack.length - 1; i >= 0; i--) {
+                const h = historyStack[i];
+                if (h.capturedByRed.length !== cr || h.capturedByBlack.length !== cb || hiddenCount(h.board) !== hc) break;
+                n++;
+            }
+            return n;
+        }
+        function drawReason() {
+            if ((positionCounts().get(positionKey(board, turn)) || 0) >= 3) return 'Thế cờ đã lặp lại 3 lần.';
+            if (noProgressPlies() >= 120) return 'Đã 60 nước mỗi bên không ăn quân, không lật quân.';
+            return '';
+        }
+
+        function showGameOver(winner, why) {
             recordResult(winner);
+            if (winner === 'draw') {
+                document.getElementById('modalIcon').textContent = '🤝';
+                document.getElementById('modalTitle').textContent = 'HÒA CỜ';
+                document.getElementById('modalDesc').textContent = (why || 'Hai bên hòa nhau.') + ' Bác có thể bấm Đi Lại hoặc chơi Ván Mới!';
+                document.getElementById('gameOverModal').classList.remove('hidden');
+                return;
+            }
             const modal = document.getElementById('gameOverModal');
             const icon = document.getElementById('modalIcon');
             const title = document.getElementById('modalTitle');
