@@ -1458,7 +1458,14 @@
         }
 
         // Nước hiển nhiên (ăn quân lớn) thì đi nhanh, thế phức tạp thì nghĩ lâu hơn
+        let sayAt = 0;
         function humanDelay(m, nMoves) {
+            if (nMoves <= 2) return 250 + Math.random() * 200; // nước bắt buộc: đi cực nhanh
+            const pv0 = historyStack[historyStack.length - 1];
+            if (pv0 && capturedByRed.length > pv0.capturedByRed.length) {
+                const lost = capturedByRed[capturedByRed.length - 1];
+                if (!lost.isHidden && PIECE_DATA[lost.trueType].val >= 450) return 1500 + Math.random() * 1300; // vừa mất quân lớn: ngập ngừng
+            }
             const t = board[m.toR][m.toC];
             if (t && lastMove && m.toR === lastMove.toR && m.toC === lastMove.toC) return 350 + Math.random() * 350; // ăn lại: đi nhanh
             if (t && !t.isHidden && PIECE_DATA[t.trueType].val >= 450) return 450 + Math.random() * 400;
@@ -1472,7 +1479,7 @@
          * Mỗi lượt mô phỏng: chia ngẫu nhiên quân úp theo xác suất còn lại -> đi xuống cây (UCT) -> chấm lá bằng tìm kiếm yên tĩnh.
          * Lật quân = nút may rủi: giá trị được lấy trung bình trên rất nhiều cách chia bài.
          * ============================================================= */
-        const TY = { K: 1, R: 2, C: 3, H: 4, E: 5, A: 6, P: 7 }, TV = [0, 0, 950, 480, 420, 210, 210, 140];
+        /*ENGINE-BEGIN*/const TY = { K: 1, R: 2, C: 3, H: 4, E: 5, A: 6, P: 7 }, TV = [0, 0, 950, 480, 420, 210, 210, 140];
         const FC = new Int8Array(90), FT = new Int8Array(90), FH = new Uint8Array(90), FS = new Int8Array(90), KP = [0, 0, 0];
         const SR = new Int8Array(90), SC = new Int8Array(90);
         for (let i = 0; i < 90; i++) { SR[i] = (i / 9) | 0; SC[i] = i % 9; }
@@ -1586,11 +1593,16 @@
                 else {
                     const t = FT[i]; if (t === 1) continue;
                     v = TV[t]; const cr = col === 1 ? r <= 4 : r >= 5;
-                    if (t === 7) { if (cr) v += 65 + 5 * (col === 1 ? 4 - r : r - 5) + (c >= 3 && c <= 5 ? 5 : 0); }
+                    if (t === 7) { if (cr) { const adv = col === 1 ? 4 - r : r - 5; v += 60 + 3 * (adv + 1) * (adv + 1) + (c >= 3 && c <= 5 ? 5 : 0) + (adv >= 3 && c >= 3 && c <= 5 ? 15 : 0); } }
                     else {
                         if (cr && t !== 5 && t !== 6) v += 8;
                         if (t === 4) v += 3 * (4 - Math.abs(c - 4)) - (c === 0 || c === 8 ? 12 : 0);
                         if (t === 3 && c === 4) v += 18;
+                        if (t === 2) { if (c >= 3 && c <= 5) v += 6; if (r === (col === 1 ? 5 : 4)) v += 8; }
+                        if (t === 4) { // Mã bị cản chân (ngoài ra Ngọa tào/Liên hoàn mã đã được tìm kiếm tự thấy)
+                            if (r > 0 && FC[i - 9]) v -= 6; if (r < 9 && FC[i + 9]) v -= 6;
+                            if (c > 0 && FC[i - 1]) v -= 6; if (c < 8 && FC[i + 1]) v -= 6;
+                        }
                     }
                 }
                 s += col === 2 ? v : -v;
@@ -1639,8 +1651,10 @@
                         let unexp = -1, tot = 0;
                         for (let j = 0; j < n; j++) if (!node.ch.has(mb[j])) { const w = FC[mb[j] >> 7] ? 4 : 1; tot += w; if (Math.random() * tot < w) unexp = mb[j]; }
                         if (unexp >= 0) {
-                            const ch = { n: 0, w: 0, av: 1, mover: col, ch: new Map() };
-                            node.ch.set(unexp, ch); fMake(unexp); path.push(ch);
+                            const ft = FH[unexp & 127] ? FT[unexp & 127] : 0;
+                            const ch = { n: 0, w: 0, av: 1, mover: col, ch: new Map(), ty: ft ? new Map() : null };
+                            node.ch.set(unexp, ch); if (ft) ch.ty.set(ft, { ch: new Map() });
+                            fMake(unexp); path.push(ch);
                             const v = fQs(3 - col, -1e5, 1e5, 3, ply + 1); p = fSig(col === 2 ? -v : v);
                             break;
                         }
@@ -1650,7 +1664,11 @@
                             const u = ch.w / ch.n + 0.7 * Math.sqrt(Math.log(ch.av) / ch.n);
                             if (u > bv) { bv = u; bm = mb[j]; bc = ch; }
                         }
-                        fMake(bm); path.push(bc); node = bc; col = 3 - col; ply++;
+                        // Lật quân úp = nút may rủi: mỗi loại quân lật ra có nhánh riêng, thống kê nước đi gộp (kỳ vọng) ở nút cha
+                        const ft = FH[bm & 127] ? FT[bm & 127] : 0;
+                        fMake(bm); path.push(bc);
+                        if (ft) { let t2 = bc.ty.get(ft); if (!t2) { t2 = { ch: new Map() }; bc.ty.set(ft, t2); } node = t2; } else node = bc;
+                        col = 3 - col; ply++;
                     }
                     root.n++;
                     for (const ch of path) { ch.n++; ch.w += ch.mover === 2 ? p : 1 - p; }
@@ -1666,8 +1684,53 @@
                 return mvs.find(m => ((m.fromR * 9 + m.fromC) | ((m.toR * 9 + m.toC) << 7)) === pick) || null;
             } catch (e) { return null; }
         }
+/*ENGINE-END*/
 
         
+        // ===== Chạy AI trong Web Worker (Blob nội tuyến, chạy offline, dùng được trong WebView/APK) =====
+        let aiWorker = null, aiWorkerFail = false, aiReq = 0;
+        function workerSource() {
+            const B = '/*ENGINE-' + 'BEGIN*/', E = '/*ENGINE-' + 'END*/';
+            const txt = [...document.scripts].map(x => x.textContent).find(t => t.indexOf(B) >= 0 && t.indexOf('function workerSource') >= 0);
+            const eng = txt.slice(txt.indexOf(B), txt.indexOf(E));
+            const pre = "const RED='r',BLACK='b';let variant,hidVal,SNAP;const DR4=[-1,1,0,0],DC4=[0,0,-1,1];const HJ=" + JSON.stringify(HJ) + ";\n" +
+                "function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));const t=a[i];a[i]=a[j];a[j]=t;}return a;}\n" +
+                "function determinizeBoard(){const nb=SNAP.board.map(r=>r.map(p=>p?Object.assign({},p):null));for(const col of[RED,BLACK]){const deck=shuffle(SNAP.pool[col].slice());for(const r of nb)for(const p of r)if(p&&p.color===col&&p.isHidden)p.trueType=deck.length?deck.pop():p.startRole;}return nb;}\n";
+            const post = "\nonmessage=function(e){const d=e.data;variant=d.variant;hidVal=d.hidVal;SNAP=d;const m=mctsPick(d.mvs,d.ms,d.variety);postMessage({id:d.id,m:m,it:lastIt});};";
+            return pre + eng + post;
+        }
+        // Gói tình huống gửi cho worker: quân úp KHÔNG kèm loại thật (chỉ vị trí xuất phát), kho quân còn lại tính từ thông tin công khai
+        function aiMsg(mvs, ms, variety, id) {
+            const snap = board.map(r => r.map(p => p ? { color: p.color, trueType: p.isHidden ? p.startRole : p.trueType, isHidden: p.isHidden, startRole: p.startRole } : null));
+            return { id, board: snap, pool: { r: unknownPool(RED), b: unknownPool(BLACK) }, variant, hidVal, ms, variety,
+                mvs: mvs.map(m => ({ fromR: m.fromR, fromC: m.fromC, toR: m.toR, toC: m.toC })) };
+        }
+        function workerPick(mvs, ms, variety) {
+            if (aiWorkerFail) return Promise.resolve(undefined);
+            try {
+                if (!aiWorker) aiWorker = new Worker(URL.createObjectURL(new Blob([workerSource()], { type: 'text/javascript' })));
+            } catch (e) { aiWorkerFail = true; return Promise.resolve(undefined); }
+            const w = aiWorker, id = ++aiReq;
+            return new Promise((res) => {
+                const fail = () => { aiWorkerFail = true; try { w.terminate(); } catch (e) {} res(undefined); };
+                const to = setTimeout(fail, ms + 5000);
+                w.onerror = () => { clearTimeout(to); fail(); };
+                w.onmessage = (e) => {
+                    if (e.data.id !== id) return;
+                    clearTimeout(to);
+                    const m = e.data.m;
+                    res(m ? (mvs.find(x => x.fromR === m.fromR && x.fromC === m.fromC && x.toR === m.toR && x.toC === m.toC) || null) : null);
+                };
+                w.postMessage(aiMsg(mvs, ms, variety, id));
+            });
+        }
+        // Worker không có/lỗi -> tự chạy ngay trên luồng chính như trước
+        async function aiPick(mvs, ms, variety) {
+            let c;
+            try { c = await workerPick(mvs, ms, variety); } catch (e) { c = undefined; }
+            return c === undefined ? mctsPick(mvs, ms, variety) : c;
+        }
+
         const HIST_KEY = 'co_tuong_up_history_v1', PROF_KEY = 'co_tuong_up_profile_v1';
         let skill = 0.25; // trình độ người chơi ước lượng, 0..1
         try { const q = JSON.parse(localStorage.getItem(PROF_KEY)); if (q && typeof q.skill === 'number') skill = q.skill; } catch (e) {}
@@ -1704,12 +1767,13 @@
                 : '<div class="text-amber-100 opacity-70">Chưa có ván nào</div>');
         }
 
-        function makeAIMove() {
+        async function makeAIMove() {
             if (gameOver || turn !== BLACK) {
                 aiBusy = false;
                 return;
             }
             const thinkStart = Date.now();
+            const token = aiToken;
             const lv = effLevel();
             updateHidVal();
             const allMoves = getAllMoves(board, BLACK);
@@ -1759,11 +1823,13 @@
                 }
             } else if (lv === 4) {
                 // Khó: nhìn trước ~3 nước, hiểu thế trận (giữ quân, bó hẹp đối thủ, áp lực lên Tướng)
-                chosen = mctsPick(mvs, 1200, 0.03) || voteSearch(mvs, 3, 900, 3);
+                chosen = (await aiPick(mvs, 1200, 0.03)) || voteSearch(mvs, 3, 900, 3);
             } else {
                 // Rất khó: tìm sâu dần theo thời gian (tối đa ~2 giây), hiểu thế trận, ưu tiên nước ăn quân
-                chosen = mctsPick(mvs, lv === 6 ? 4000 : 2200, lv === 6 ? 0.01 : 0.02) || voteSearch(mvs, lv === 6 ? 5 : 3, lv === 6 ? 4500 : 2400, lv === 6 ? 10 : 7);
+                chosen = (await aiPick(mvs, lv === 6 ? 4000 : 2200, lv === 6 ? 0.01 : 0.02)) || voteSearch(mvs, lv === 6 ? 5 : 3, lv === 6 ? 4500 : 2400, lv === 6 ? 10 : 7);
             }
+
+            if (token !== aiToken || gameOver || turn !== BLACK) return; // ván đã đổi trong lúc máy nghĩ
 
             // Người thật thỉnh thoảng đi nước khác (vẫn hợp lý, không phải nước ngớ ngẩn); Cao thủ thì không lỡ tay
             const slipP = { 3: 0.10, 4: 0.05, 5: 0.02 }[lv] || 0;
@@ -1775,7 +1841,7 @@
             }
 
             // Phản ứng như người: tiếc khi mất quân lớn, mừng khi ăn quân lớn
-            const say = (arr) => showToast(arr[Math.floor(Math.random() * arr.length)]);
+            const say = (arr) => { if (Date.now() - sayAt < 6000) return; sayAt = Date.now(); showToast(arr[Math.floor(Math.random() * arr.length)]); };
             const prev = historyStack[historyStack.length - 1];
             if (prev && capturedByRed.length > prev.capturedByRed.length && Math.random() < 0.5) {
                 const lost = capturedByRed[capturedByRed.length - 1];
@@ -1784,12 +1850,14 @@
             const tgt = board[chosen.toR][chosen.toC];
             const big = tgt && !tgt.isHidden && PIECE_DATA[tgt.trueType].val >= 450;
 
-            const token = aiToken;
             const wait = Math.max(0, humanDelay(chosen, allMoves.length) - (Date.now() - thinkStart));
             setTimeout(() => {
                 if (token !== aiToken || gameOver || turn !== BLACK) return;
                 aiBusy = false;
+                const wasHid = board[chosen.fromR][chosen.fromC].isHidden;
                 makeMove(chosen.fromR, chosen.fromC, chosen.toR, chosen.toC);
+                if (!gameOver && isInCheck(board, RED) && Math.random() < 0.6) say(['Chiếu nhé!', 'Cẩn thận Tướng đấy!']);
+                else if (wasHid && board[chosen.toR][chosen.toC].trueType === 'R' && Math.random() < 0.7) say(['Lật được Xe, may quá!', 'Xe ra rồi nhé!']);
                 if (big && !gameOver && Math.random() < 0.5) say(['Xin lỗi bác nhé 😄', 'Cảm ơn quân nhé!', 'Ăn được rồi!']);
             }, wait);
         }
