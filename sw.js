@@ -1,4 +1,5 @@
-const CACHE_NAME = 'co-tuong-up-network-first-v3';
+// MỖI LẦN PHÁT HÀNH: đổi số v... bên dưới để máy người chơi tự cập nhật và tự tải lại.
+const CACHE_NAME = 'co-tuong-up-network-first-v4';
 const EXTERNAL = [
   'https://cdn.tailwindcss.com',
   'https://fonts.googleapis.com/css2?family=Noto+Serif:wght@700;900&family=Be+Vietnam+Pro:wght@600;700;800;900&display=swap'
@@ -39,7 +40,7 @@ self.addEventListener('message', (event) => {
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   event.respondWith(
-    fetch(event.request)
+    fetch(event.request, new URL(event.request.url).origin === self.location.origin ? { cache: 'no-cache' } : undefined) // luôn hỏi lại máy chủ, không dùng bản trong cache HTTP của trình duyệt
       .then((networkResponse) => {
         if (networkResponse && (networkResponse.status === 200 || networkResponse.type === 'opaque') && event.request.url.startsWith('http')) {
           const cloned = networkResponse.clone();
